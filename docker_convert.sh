@@ -8,8 +8,8 @@ OUTPUT=/path/to/output
 # Ensure output directory exists
 mkdir -p $OUTPUT
 
-# Delete previous outputs
-rm -rf $OUTPUT/kitti_*
+# # Delete previous outputs
+# rm -rf $OUTPUT/kitti_*
 
 # Example run command
 docker run -t --rm --tty \
@@ -19,3 +19,5 @@ docker run -t --rm --tty \
     -v $OUTPUT:/output \
     kitti2bag:ros2-jazzy \
     bash -c "kitti2bag raw_synced /data -t ${TIME} -r ${SEQUENCE} -o /output"
+
+ls -lath $OUTPUT

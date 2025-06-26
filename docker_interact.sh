@@ -12,6 +12,7 @@ mkdir -p $OUTPUT
 
 # Run in interactive bash terminal
 docker run -it --rm --tty \
+    --name kitti2bag-ros2-jazzy
     --ipc=host --privileged \
     -e LOCAL_USER_ID=$(id -u) \
     -e LOCAL_GROUP_ID=$(id -g) \
