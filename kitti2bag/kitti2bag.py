@@ -199,7 +199,7 @@ def save_camera_data(bag, kitti_type, kitti, util, bridge, camera, camera_frame_
         
         calib = CameraInfo()
         calib.header.frame_id = camera_frame_id
-        calib.width, calib.height = tuple(util['S_rect_{}'.format(camera_pad)].tolist())
+        calib.height, calib.width = tuple(util['S_rect_{}'.format(camera_pad)].tolist())
         calib.distortion_model = 'plumb_bob'
         calib.k = util['K_{}'.format(camera_pad)].flatten().tolist()
         calib.r = util['R_rect_{}'.format(camera_pad)].flatten().tolist()
