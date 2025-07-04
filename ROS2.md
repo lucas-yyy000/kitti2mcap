@@ -179,7 +179,7 @@ Inside the docker container, you can run the following commands to convert kitti
 Change the `$SEQUENCE` variable in `docker_convert.sh` script to convert the `0001` and `0002` sequences of `2011_09_26` KITTI dataset respectively in non-interactive mode. Then run the following:
 
 ```bash
-./docker_convert.sh
+./docker_convert_raw.sh
 ```
 
 For `0001` sequence, the script basically runs the following command:

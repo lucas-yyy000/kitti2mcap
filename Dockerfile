@@ -16,7 +16,7 @@ RUN apt-get update \
 
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get -y install \
-    gosu \
+    gosu rsync tree vim wget zip \
   && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies (including tf_transformations via pip)

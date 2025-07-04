@@ -1,15 +1,16 @@
 #!/bin/bash
 
+# Example
+# ./docker_convert_odom.sh /mnt/data/kitti/kitti_odom/dataset /mnt/data/kitti/kitti_odom/dataset/sequences/output
+
 TIME=2011_09_26
-SEQUENCE=0001
-INPUT=/path/to/kitti
-OUTPUT=/path/to/output
+SEQUENCE=00
+INPUT=${1:-"./data"}
+OUTPUT=${2:-"./output"}
 
 # Ensure output directory exists
+# rm -rf $OUTPUT
 mkdir -p $OUTPUT
-
-# # Delete previous outputs
-# rm -rf $OUTPUT/kitti_*
 
 # Example run command
 docker run -t --rm --tty \
@@ -18,6 +19,6 @@ docker run -t --rm --tty \
     -v $INPUT:/data \
     -v $OUTPUT:/output \
     kitti2bag:ros2-jazzy \
-    bash -c "kitti2bag raw_synced /data -t ${TIME} -r ${SEQUENCE} -o /output"
+    bash -c "kitti2bag odom_gray /data -s ${SEQUENCE} -o /output"
 
 ls -lath $OUTPUT
