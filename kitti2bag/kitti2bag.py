@@ -2,15 +2,9 @@
 # -*- coding: utf-8 -*-
 
 import sys
-
-try:
-    import pykitti
-except ImportError as e:
-    print('Could not load module \'pykitti\'. Please run `pip install pykitti`')
-    sys.exit(1)
-
 import os
 import cv2
+import pykitti
 import rclpy
 from rclpy.serialization import serialize_message
 import progressbar
@@ -26,25 +20,8 @@ import argparse
 from tf_transformations import quaternion_from_euler, quaternion_from_matrix
 import rosbag2_py
 from builtin_interfaces.msg import Time as TimeMsg
+from datetime import datetime, timezone
 
-def datetime_to_ros_time(dt):
-    """Convert datetime to ROS2 Time message"""
-    timestamp = float(dt.strftime("%s.%f"))
-    seconds = int(timestamp)
-    nanoseconds = int((timestamp - seconds) * 1e9)
-    time_msg = TimeMsg()
-    time_msg.sec = seconds
-    time_msg.nanosec = nanoseconds
-    return time_msg
-
-def float_to_ros_time(timestamp):
-    """Convert float timestamp to ROS2 Time message"""
-    seconds = int(timestamp)
-    nanoseconds = int((timestamp - seconds) * 1e9)
-    time_msg = TimeMsg()
-    time_msg.sec = seconds
-    time_msg.nanosec = nanoseconds
-    return time_msg
 
 class ROS2BagWriter:
     """ROS2 bag writer wrapper"""
@@ -237,43 +214,91 @@ def save_camera_data(bag, kitti_type, kitti, util, bridge, camera, camera_frame_
         bag.write(topic + topic_ext, image_message, t = image_message.header.stamp)
         bag.write(topic + '/camera_info', calib, t = calib.header.stamp) 
         
-def save_velo_data(bag, kitti, velo_frame_id, topic):
+
+def save_velo_data(bag, kitti, velo_frame_id, topic, kitti_type, initial_time=None):
+    """
+    Save Velodyne scans for either RAW ('raw_synced') or ODOMETRY ('odom_*') datasets.
+
+    RAW:
+      - files in: <kitti.data_path>/velodyne_points/data/*.bin
+      - timestamps in: <kitti.data_path>/velodyne_points/timestamps.txt (datetime strings)
+
+    ODOMETRY:
+      - files in: <kitti.sequence_path>/velodyne/*.bin
+      - timestamps: use kitti.timestamps (timedelta objects) if available; otherwise synthesize None.
+                    If initial_time (epoch float) is provided, convert timedelta to absolute Time.
+    """
     print("Exporting velodyne data")
-    velo_path = os.path.join(kitti.data_path, 'velodyne_points')
-    velo_data_dir = os.path.join(velo_path, 'data')
-    velo_filenames = sorted(os.listdir(velo_data_dir))
-    with open(os.path.join(velo_path, 'timestamps.txt'), 'r', encoding='utf-8') as f:
-        lines = f.readlines()
-        velo_datetimes = []
-        for line in lines:
-            if len(line) == 1:
-                continue
-            dt = datetime.strptime(line[:-4], '%Y-%m-%d %H:%M:%S.%f')
-            velo_datetimes.append(dt)
+    if "raw" in kitti_type:
+        velo_path = os.path.join(kitti.data_path, 'velodyne_points')
+        velo_data_dir = os.path.join(velo_path, 'data')
+        velo_filenames = sorted(os.listdir(velo_data_dir))
 
-    iterable = zip(velo_datetimes, velo_filenames)
+        # read datetimes
+        ts_path = os.path.join(velo_path, 'timestamps.txt')
+        with open(ts_path, 'r', encoding='utf-8') as f:
+            dt_list = []
+            for line in f:
+                if len(line.strip()) == 0:
+                    continue
+                dt_list.append(datetime.strptime(line.strip()[:-4], '%Y-%m-%d %H:%M:%S.%f'))
+        timestamps = dt_list
+
+    elif "odom" in kitti_type:
+        velo_data_dir = os.path.join(kitti.sequence_path, 'velodyne')
+        velo_filenames = sorted(os.listdir(velo_data_dir))
+
+        # kitti.timestamps for odometry are list of timedelta objects (often from times.txt).
+        # Convert to ROS2 Time using initial_time (epoch) if provided; otherwise keep None.
+        if getattr(kitti, 'timestamps', None) and len(kitti.timestamps) == len(velo_filenames):
+            timestamps = []
+            if initial_time is not None:
+                for td in kitti.timestamps:
+                    # td is a datetime.timedelta
+                    timestamps.append(initial_time + td.total_seconds())
+            else:
+                # keep timedelta; we’ll handle it when stamping
+                timestamps = kitti.timestamps
+        else:
+            # No timestamps available or length mismatch
+            timestamps = [None] * len(velo_filenames)
+    else:
+        raise ValueError(f"Unknown kitti_type: {kitti_type}")
+
+    iterable = zip(timestamps, velo_filenames)
     bar = progressbar.ProgressBar()
-    for dt, filename in bar(iterable):
-        if dt is None:
-            continue
+    for ts, fname in bar(iterable):
+        velo_filename = os.path.join(velo_data_dir, fname)
 
-        velo_filename = os.path.join(velo_data_dir, filename)
+        # read binary points: x,y,z,intensity (float32)
+        scan = np.fromfile(velo_filename, dtype=np.float32).reshape(-1, 4)
 
-        # read binary data
-        scan = (np.fromfile(velo_filename, dtype=np.float32)).reshape(-1, 4)
-
-        # create header
+        # header with time
         header = Header()
         header.frame_id = velo_frame_id
-        header.stamp = datetime_to_ros_time(dt)
+        if "raw" in kitti_type:
+            if isinstance(ts, datetime):
+                header.stamp = datetime_to_ros_time(ts)
+            else:
+                header.stamp = TimeMsg(sec=0, nanosec=0)
+        else:  # "odom"
+            # ts can be: float epoch seconds, int, timedelta, or datetime
+            if isinstance(ts, (float, int)):
+                header.stamp = float_to_ros_time(float(ts))
+            elif hasattr(ts, 'total_seconds') and initial_time is not None:
+                header.stamp = float_to_ros_time(initial_time + ts.total_seconds())
+            elif isinstance(ts, datetime):
+                header.stamp = datetime_to_ros_time(ts)
+            else:
+                header.stamp = TimeMsg(sec=0, nanosec=0)
 
-        # fill pcl msg
-        fields = [PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
-                  PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
-                  PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
-                  PointField(name='i', offset=12, datatype=PointField.FLOAT32, count=1)]
+        fields = [
+            PointField(name='x', offset=0,  datatype=PointField.FLOAT32, count=1),
+            PointField(name='y', offset=4,  datatype=PointField.FLOAT32, count=1),
+            PointField(name='z', offset=8,  datatype=PointField.FLOAT32, count=1),
+            PointField(name='i', offset=12, datatype=PointField.FLOAT32, count=1),
+        ]
         pcl_msg = pcl2.create_cloud(header, fields, scan)
-
         bag.write(topic + '/pointcloud', pcl_msg, t=pcl_msg.header.stamp)
 
 
@@ -342,6 +367,58 @@ def save_gps_vel_data(bag, kitti, gps_frame_id, topic):
         twist_msg.twist.angular.z = oxts.packet.wu
         bag.write(topic, twist_msg, t=twist_msg.header.stamp)
 
+
+def save_static_transforms_odometry(bag, kitti, velo_frame_id='velo_link', base_epoch=None):
+    tfm = TFMessage()
+    for parent, child, T in [
+        (velo_frame_id, 'camera_color_left',  np.asarray(kitti.calib.T_cam2_velo)),
+        (velo_frame_id, 'camera_color_right', np.asarray(kitti.calib.T_cam3_velo)),
+        (velo_frame_id, 'camera_gray_left',   np.asarray(kitti.calib.T_cam0_velo)),
+        (velo_frame_id, 'camera_gray_right',  np.asarray(kitti.calib.T_cam1_velo)),
+    ]:
+        t = get_static_transform(parent, child, T)
+        tfm.transforms.append(t)
+
+    if kitti.timestamps and base_epoch is not None:
+        first_stamp = float_to_ros_time(base_epoch + kitti.timestamps[0].total_seconds())
+    else:
+        first_stamp = datetime_to_ros_time(datetime.now(timezone.utc))
+
+    for i in range(len(tfm.transforms)):
+        tfm.transforms[i].header.stamp = first_stamp
+    bag.write('/tf_static', tfm, t=first_stamp)
+
+
+def datetime_to_ros_time(dt):
+    """Convert an aware datetime (UTC) to ROS2 Time message."""
+    # Ensure timezone-aware UTC
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    ts = dt.timestamp()
+    sec = int(ts)
+    nsec = int(round((ts - sec) * 1e9))
+    # Normalize edge case nsec==1e9
+    if nsec == 1_000_000_000:
+        sec += 1
+        nsec = 0
+    t = TimeMsg()
+    t.sec = sec
+    t.nanosec = nsec
+    return t
+
+def float_to_ros_time(tsec: float):
+    """Float seconds since Unix epoch -> ROS2 Time message."""
+    sec = int(tsec)
+    nsec = int(round((tsec - sec) * 1e9))
+    if nsec == 1_000_000_000:
+        sec += 1
+        nsec = 0
+    t = TimeMsg()
+    t.sec = sec
+    t.nanosec = nsec
+    return t
 
 def run_kitti2bag():
     parser = argparse.ArgumentParser(description = "Convert KITTI dataset to ROS bag file the easy way!")
@@ -430,13 +507,13 @@ def run_kitti2bag():
             save_gps_vel_data(bag, kitti, imu_frame_id, gps_vel_topic)
             for camera in cameras:
                 save_camera_data(bag, args.kitti_type, kitti, util, bridge, camera=camera[0], camera_frame_id=camera[1], topic=camera[2], initial_time=None)
-            save_velo_data(bag, kitti, velo_frame_id, velo_topic)
+            save_velo_data(bag, kitti, velo_frame_id, velo_topic, kitti_type=args.kitti_type, initial_time=None)
 
         finally:
             bag.close()
             
     elif args.kitti_type.find("odom") != -1:
-        
+        print("Converting KITTI Odometry dataset")
         if args.sequence == None:
             print("Sequence option is not given. It is mandatory for odometry dataset.")
             print("Usage for odometry dataset: kitti2bag {odom_color, odom_gray} [dir] -s <sequence> [-o output_dir]")
@@ -465,7 +542,9 @@ def run_kitti2bag():
 
         try:
             util = pykitti.utils.read_calib_file(os.path.join(args.dir,'sequences',args.sequence, 'calib.txt'))
-            current_epoch = (datetime.utcnow() - datetime(1970, 1, 1)).total_seconds()
+            current_epoch = datetime.now(timezone.utc).timestamp()
+            save_static_transforms_odometry(bag, kitti, velo_frame_id='velo_link', base_epoch=current_epoch)
+
             # Export
             used_cameras = []
             if args.kitti_type.find("gray") != -1:
@@ -476,9 +555,13 @@ def run_kitti2bag():
             save_dynamic_tf(bag, kitti, args.kitti_type, initial_time=current_epoch)
             for camera in used_cameras:
                 save_camera_data(bag, args.kitti_type, kitti, util, bridge, camera=camera[0], camera_frame_id=camera[1], topic=camera[2], initial_time=current_epoch)
+            
+            velo_frame_id = 'velo_link'
+            velo_topic = '/kitti/velo'
+            save_velo_data(bag, kitti, velo_frame_id, velo_topic, kitti_type=args.kitti_type, initial_time=current_epoch)
+
 
         finally:
             print("## OVERVIEW ##")
-            # print(bag)  # ROS2 bag doesn't have __str__ method
             bag.close()
 

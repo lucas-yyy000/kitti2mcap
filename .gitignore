@@ -95,3 +95,7 @@ ENV/
 
 # Temporary files from text editors
 *~
+
+.vscode/
+data/
+output/
