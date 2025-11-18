@@ -14,6 +14,7 @@ from std_msgs.msg import Header
 from sensor_msgs.msg import CameraInfo, Imu, PointField, NavSatFix
 from sensor_msgs_py import point_cloud2 as pcl2
 from geometry_msgs.msg import TransformStamped, TwistStamped, Transform
+from nav_msgs.msg import Odometry
 from cv_bridge import CvBridge
 import numpy as np
 import argparse
@@ -143,7 +144,7 @@ def save_dynamic_tf(bag, kitti, kitti_type, initial_time):
             tf_stamped = TransformStamped()
             tf_stamped.header.stamp = float_to_ros_time(timestamp)
             tf_stamped.header.frame_id = 'world'
-            tf_stamped.child_frame_id = 'camera_left'
+            tf_stamped.child_frame_id = 'camera_color_left'
             
             t = tf_matrix[0:3, 3]
             q = quaternion_from_matrix(tf_matrix)
@@ -342,6 +343,60 @@ def save_static_transforms(bag, transforms, timestamps):
         bag.write('/tf_static', tfm, t=time)
 
 
+def save_static_transforms_odometry(bag, kitti, velo_frame_id='velo_link', base_epoch=None):
+    tfm = TFMessage()
+
+    T_cam2_velo = np.asarray(kitti.calib.T_cam2_velo)          # cam2 <- velo
+    T_velo_cam2 = inv(T_cam2_velo)                             # velo <- cam2
+    tfm.transforms.append(
+        get_static_transform('camera_color_left', velo_frame_id, T_velo_cam2)
+    )
+
+    tfm.transforms.append(
+        get_static_transform(velo_frame_id, 'camera_color_right',
+                             np.asarray(kitti.calib.T_cam3_velo))
+    )
+    tfm.transforms.append(
+        get_static_transform(velo_frame_id, 'camera_gray_left',
+                             np.asarray(kitti.calib.T_cam0_velo))
+    )
+    tfm.transforms.append(
+        get_static_transform(velo_frame_id, 'camera_gray_right',
+                             np.asarray(kitti.calib.T_cam1_velo))
+    )
+
+    if kitti.timestamps and base_epoch is not None:
+        first_stamp = float_to_ros_time(base_epoch + kitti.timestamps[0].total_seconds())
+    else:
+        first_stamp = datetime_to_ros_time(datetime.now(timezone.utc))
+
+    for tr in tfm.transforms:
+        tr.header.stamp = first_stamp
+
+    bag.write('/tf_static', tfm, t=first_stamp)
+
+
+# def save_static_transforms_odometry(bag, kitti, velo_frame_id='velo_link', base_epoch=None):
+#     tfm = TFMessage()
+#     for parent, child, T in [
+#         (velo_frame_id, 'camera_color_left',  np.asarray(kitti.calib.T_cam2_velo)),
+#         (velo_frame_id, 'camera_color_right', np.asarray(kitti.calib.T_cam3_velo)),
+#         (velo_frame_id, 'camera_gray_left',   np.asarray(kitti.calib.T_cam0_velo)),
+#         (velo_frame_id, 'camera_gray_right',  np.asarray(kitti.calib.T_cam1_velo)),
+#     ]:
+#         t = get_static_transform(parent, child, T)
+#         tfm.transforms.append(t)
+
+#     if kitti.timestamps and base_epoch is not None:
+#         first_stamp = float_to_ros_time(base_epoch + kitti.timestamps[0].total_seconds())
+#     else:
+#         first_stamp = datetime_to_ros_time(datetime.now(timezone.utc))
+
+#     for i in range(len(tfm.transforms)):
+#         tfm.transforms[i].header.stamp = first_stamp
+#     bag.write('/tf_static', tfm, t=first_stamp)
+
+
 def save_gps_fix_data(bag, kitti, gps_frame_id, topic):
     for timestamp, oxts in zip(kitti.timestamps, kitti.oxts):
         navsatfix_msg = NavSatFix()
@@ -368,25 +423,46 @@ def save_gps_vel_data(bag, kitti, gps_frame_id, topic):
         bag.write(topic, twist_msg, t=twist_msg.header.stamp)
 
 
-def save_static_transforms_odometry(bag, kitti, velo_frame_id='velo_link', base_epoch=None):
-    tfm = TFMessage()
-    for parent, child, T in [
-        (velo_frame_id, 'camera_color_left',  np.asarray(kitti.calib.T_cam2_velo)),
-        (velo_frame_id, 'camera_color_right', np.asarray(kitti.calib.T_cam3_velo)),
-        (velo_frame_id, 'camera_gray_left',   np.asarray(kitti.calib.T_cam0_velo)),
-        (velo_frame_id, 'camera_gray_right',  np.asarray(kitti.calib.T_cam1_velo)),
-    ]:
-        t = get_static_transform(parent, child, T)
-        tfm.transforms.append(t)
+def save_groundtruth_odometry(bag, kitti, topic, frame_id, child_frame_id, initial_time):
+    """
+    Save KITTI odometry ground truth poses (kitti.poses) as nav_msgs/Odometry.
+    - frame_id: usually 'world'
+    - child_frame_id: usually the sensor frame whose pose the GT describes
+                      (here consistent with save_dynamic_tf: 'camera_left')
+    - initial_time: float epoch seconds used together with kitti.timestamps (timedelta)
+    """
+    if not hasattr(kitti, "poses") or kitti.poses is None or len(kitti.poses) == 0:
+        print("No ground truth poses found in this KITTI odometry sequence. Skipping GT odometry export.")
+        return
 
-    if kitti.timestamps and base_epoch is not None:
-        first_stamp = float_to_ros_time(base_epoch + kitti.timestamps[0].total_seconds())
-    else:
-        first_stamp = datetime_to_ros_time(datetime.now(timezone.utc))
+    if not getattr(kitti, "timestamps", None) or len(kitti.timestamps) != len(kitti.poses):
+        print("Timestamps and poses length mismatch (or no timestamps). Skipping GT odometry export.")
+        return
 
-    for i in range(len(tfm.transforms)):
-        tfm.transforms[i].header.stamp = first_stamp
-    bag.write('/tf_static', tfm, t=first_stamp)
+    print("Exporting ground truth odometry")
+    # kitti.timestamps is a list of timedelta; convert to epoch seconds
+    timestamps = map(lambda x: initial_time + x.total_seconds(), kitti.timestamps)
+
+    for tsec, pose_mat in zip(timestamps, kitti.poses):
+        odom = Odometry()
+        odom.header.stamp = float_to_ros_time(tsec)
+        odom.header.frame_id = frame_id          # e.g. 'world'
+        odom.child_frame_id = child_frame_id     # e.g. 'camera_left'
+
+        # translation
+        t = pose_mat[0:3, 3]
+        odom.pose.pose.position.x = float(t[0])
+        odom.pose.pose.position.y = float(t[1])
+        odom.pose.pose.position.z = float(t[2])
+
+        # rotation
+        q = quaternion_from_matrix(pose_mat)
+        odom.pose.pose.orientation.x = float(q[0])
+        odom.pose.pose.orientation.y = float(q[1])
+        odom.pose.pose.orientation.z = float(q[2])
+        odom.pose.pose.orientation.w = float(q[3])
+
+        bag.write(topic, odom, t=odom.header.stamp)
 
 
 def datetime_to_ros_time(dt):
@@ -553,6 +629,17 @@ def run_kitti2bag():
                 used_cameras = cameras[-2:]
 
             save_dynamic_tf(bag, kitti, args.kitti_type, initial_time=current_epoch)
+
+            gt_odom_topic = "/kitti/odom"
+            save_groundtruth_odometry(
+                bag,
+                kitti,
+                topic=gt_odom_topic,
+                frame_id="world",
+                child_frame_id="camera_color_left",
+                initial_time=current_epoch,
+            )
+
             for camera in used_cameras:
                 save_camera_data(bag, args.kitti_type, kitti, util, bridge, camera=camera[0], camera_frame_id=camera[1], topic=camera[2], initial_time=current_epoch)
             
