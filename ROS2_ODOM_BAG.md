@@ -3,17 +3,34 @@
 Here are the instructions how to run kitti2bag in ROS2 docker container. These are examples so please adopt the bash scripts according to your need.
 
 ## Download KITTI Odometry dataset
-Make sure to download the odometry dataset to ```data/```, the folder structure should looks like:
+Download the odometry dataset and create a folder structure that looks like:
 ```
 data/
  |- poses/
  |  |- 00.txt 
  |  |- ...
  |- sequences/
-    | - 00/
-    | - ...
+ |  |- 00/
+ |  |  |- calib.txt
+ |  |  |- image_2/
+ |  |  |- image_3/
+ |  |  |- times.txt
+ |  |  |- velodyne/
+ |  |- 01/
+ |  |- ...
 ```
 
+When you download the dataset from the KITTI website, you should download the following parts of the odometry dataset:
+* color
+* velodyne laser data
+* calibration files
+* ground truth poses
+
+You can make sure your data gets structured correctly by unzipping the each downloaded file with:
+
+```
+unzip <downloaded zip file> -d <parent directory of KITTI data>
+```
 
 ## Build docker image
 
@@ -24,12 +41,11 @@ To build the ROS2 Jazzy docker environment, run the following.
 ```
 
 
-## Example of attaching to the existing container
+## Running docker container
 
 ```bash
-./docker_attach.sh
+./docker_run.sh <data directory> <output bag directory>
 ```
-
 
 ## KITTI Odom Sequence 00 Example
 
