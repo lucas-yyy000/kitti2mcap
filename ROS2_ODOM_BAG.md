@@ -44,7 +44,13 @@ To build the ROS2 Jazzy docker environment, run the following.
 ## Running docker container
 
 ```bash
-./docker_run.sh <data directory> <output bag directory>
+./docker_interact.sh <data directory> <output bag directory>
+```
+
+## Attach to a running container
+
+```bash
+./docker_attach.sh
 ```
 
 ## KITTI Odom Sequence 00 Example
