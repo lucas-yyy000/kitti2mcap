@@ -108,7 +108,7 @@ def save_imu_data(bag, kitti, imu_frame_id, topic):
         bag.write(topic, imu, t=imu.header.stamp)
 
 
-def save_dynamic_tf(bag, kitti, kitti_type, initial_time):
+def save_dynamic_tf(bag, kitti, kitti_type, initial_time, T_base_link_to_imu=None):
     print("Exporting time dependent transformations")
     if kitti_type.find("raw") != -1:
         for timestamp, oxts in zip(kitti.timestamps, kitti.oxts):
@@ -118,7 +118,8 @@ def save_dynamic_tf(bag, kitti, kitti_type, initial_time):
             tf_oxts_transform.header.frame_id = 'world'
             tf_oxts_transform.child_frame_id = 'base_link'
 
-            transform = (oxts.T_w_imu)
+            T_bl_imu = T_base_link_to_imu if T_base_link_to_imu is not None else np.eye(4)
+            transform = oxts.T_w_imu.dot(inv(T_bl_imu))
             t = transform[0:3, 3]
             q = quaternion_from_matrix(transform)
             oxts_tf = Transform()
@@ -346,23 +347,21 @@ def save_static_transforms(bag, transforms, timestamps):
 def save_static_transforms_odometry(bag, kitti, velo_frame_id='velo_link', base_epoch=None):
     tfm = TFMessage()
 
-    T_cam2_velo = np.asarray(kitti.calib.T_cam2_velo)          # cam2 <- velo
-    T_velo_cam2 = inv(T_cam2_velo)                             # velo <- cam2
     tfm.transforms.append(
-        get_static_transform('camera_color_left', velo_frame_id, T_velo_cam2)
+        get_static_transform(velo_frame_id, 'camera_color_left',
+                             inv(np.asarray(kitti.calib.T_cam2_velo)))
     )
-
     tfm.transforms.append(
         get_static_transform(velo_frame_id, 'camera_color_right',
-                             np.asarray(kitti.calib.T_cam3_velo))
+                             inv(np.asarray(kitti.calib.T_cam3_velo)))
     )
     tfm.transforms.append(
         get_static_transform(velo_frame_id, 'camera_gray_left',
-                             np.asarray(kitti.calib.T_cam0_velo))
+                             inv(np.asarray(kitti.calib.T_cam0_velo)))
     )
     tfm.transforms.append(
         get_static_transform(velo_frame_id, 'camera_gray_right',
-                             np.asarray(kitti.calib.T_cam1_velo))
+                             inv(np.asarray(kitti.calib.T_cam1_velo)))
     )
 
     if kitti.timestamps and base_epoch is not None:
@@ -577,7 +576,7 @@ def run_kitti2bag():
 
             # Export
             save_static_transforms(bag, transforms, kitti.timestamps)
-            save_dynamic_tf(bag, kitti, args.kitti_type, initial_time=None)
+            save_dynamic_tf(bag, kitti, args.kitti_type, initial_time=None, T_base_link_to_imu=T_base_link_to_imu)
             save_imu_data(bag, kitti, imu_frame_id, imu_topic)
             save_gps_fix_data(bag, kitti, imu_frame_id, gps_fix_topic)
             save_gps_vel_data(bag, kitti, imu_frame_id, gps_vel_topic)
@@ -618,7 +617,7 @@ def run_kitti2bag():
 
         try:
             util = pykitti.utils.read_calib_file(os.path.join(args.dir,'sequences',args.sequence, 'calib.txt'))
-            current_epoch = datetime.now(timezone.utc).timestamp()
+            current_epoch = 0.0
             save_static_transforms_odometry(bag, kitti, velo_frame_id='velo_link', base_epoch=current_epoch)
 
             # Export
